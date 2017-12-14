@@ -1,4 +1,5 @@
 ﻿#include "DemoGame.h"
+#include "GameController.h"
 
 //构造
 DemoGame::DemoGame() :
@@ -10,7 +11,6 @@ DemoGame::DemoGame() :
 {
 
 }
-
 
 //析构
 DemoGame::~DemoGame()
@@ -42,8 +42,7 @@ void DemoGame::RunMessageLoop()
 		}
 		else 
 		{
-			//绘制
-			OnRender();
+			m_pGameController->GameRunning();
 		}
 	}
 }
@@ -67,6 +66,20 @@ LRESULT DemoGame::CreateDeviceIndependentResources()
 		);
 
 	}
+
+	//Create Text Format 
+	if (SUCCEEDED(hr)) {
+		hr = DWriteCreateFactory(
+			DWRITE_FACTORY_TYPE_SHARED,
+			__uuidof(IDWriteFactory),
+			reinterpret_cast<IUnknown**>(&m_pDWriteFactory));
+	}
+
+	if (SUCCEEDED(hr)) {
+		hr = m_pDWriteFactory->CreateTextFormat(L"微软雅黑", NULL, DWRITE_FONT_WEIGHT_REGULAR, \
+			DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"chs", &m_pTextFormat);
+	}
+
 	return hr;
 }
 
@@ -103,27 +116,78 @@ LRESULT DemoGame::CreateDeviceResources()
 				&m_pCornflowerBlueBrush
 			);
 		}
+
 	}
 
 	return hr;
 }
 
 //加载图片资源
-void DemoGame::LoadImageResources()
+ID2D1Bitmap* DemoGame::LoadImageResource(int resNum, LPCWSTR resType)
 {
 	HRESULT hr = S_OK;
 
 	hr = CreateDeviceResources();
 
+	//imageResHandle = FindResource(
+	//	NULL,             // This component.
+	//	MAKEINTRESOURCE(resNum),   // Resource name.
+	//	resType);
+
+	imageResHandle = FindResource(
+		NULL,             // This component.
+		MAKEINTRESOURCE(resNum),   // Resource name.
+		resType);
+
+	hr = (imageResHandle ? S_OK : E_FAIL);
+
+	// Load the resource to the HGLOBAL.
 	if (SUCCEEDED(hr)) {
-		//create an IWICBitmapDecoder from an image file
-		hr = m_pWicImagingFactory->CreateDecoderFromFilename(
-			L"E:/test.jpg",						// Image to be decoded
-			NULL,								// Do not prefer a particular vendor
-			GENERIC_READ,						// Desired read access to the file
-			WICDecodeMetadataCacheOnDemand,		// Cache metadata when needed
-			&m_pWicDecoder                      // Pointer to the decoder
-		);
+		imageResDataHandle = LoadResource(NULL, imageResHandle);
+		hr = (imageResDataHandle ? S_OK : E_FAIL);
+	}
+
+	// Lock the resource to retrieve memory pointer.
+	if (SUCCEEDED(hr)) {
+		pImageFile = LockResource(imageResDataHandle);
+		hr = (pImageFile ? S_OK : E_FAIL);
+	}
+
+	// Calculate the size.
+	if (SUCCEEDED(hr)) {
+		imageFileSize = SizeofResource(NULL, imageResHandle);
+		hr = (imageFileSize ? S_OK : E_FAIL);
+	}
+
+	if (SUCCEEDED(hr)) {
+		hr = m_pWicImagingFactory->CreateStream(&m_pWicStream);
+	}
+
+	//if (SUCCEEDED(hr)) {
+	//	//create an IWICBitmapDecoder from an image file
+	//	//hr = m_pWicImagingFactory->CreateDecoderFromFilename(
+	//	//	L"E:/test.jpg",						// Image to be decoded
+	//	//	NULL,								// Do not prefer a particular vendor
+	//	//	GENERIC_READ,						// Desired read access to the file
+	//	//	WICDecodeMetadataCacheOnDemand,		// Cache metadata when needed
+	//	//	&m_pWicDecoder                      // Pointer to the decoder
+	//	//);
+
+	//}
+
+	// Initialize the stream with the memory pointer and size.
+	if (SUCCEEDED(hr)) {
+		hr = m_pWicStream->InitializeFromMemory(
+			reinterpret_cast<BYTE*>(pImageFile),
+			imageFileSize);
+	}
+
+	if (SUCCEEDED(hr)) {
+		hr = m_pWicImagingFactory->CreateDecoderFromStream(
+			m_pWicStream,                   // The stream to use to create the decoder
+			NULL,                          // Do not prefer a particular vendor
+			WICDecodeMetadataCacheOnLoad,  // Cache metadata when needed
+			&m_pWicDecoder);                   // Pointer to the decoder
 	}
 
 	// Retrieve the first bitmap frame.
@@ -150,11 +214,12 @@ void DemoGame::LoadImageResources()
 	}
 
 	//Create an ID2D1Bitmap object
-	if (m_pConvertedSourceBitMap && !m_pD2DBMP_MoveSprite) 
+	if (m_pConvertedSourceBitMap)
 	{
-		m_pRenderTarget->CreateBitmapFromWicBitmap(m_pConvertedSourceBitMap, NULL, &m_pD2DBMP_MoveSprite);
+		m_pRenderTarget->CreateBitmapFromWicBitmap(m_pConvertedSourceBitMap, NULL, &m_pTempID2DBitmap);
 	}
 
+	return m_pTempID2DBitmap;
 }
 
 //初始化
@@ -166,13 +231,10 @@ HRESULT DemoGame::Initialize()
 	hr = CreateDeviceIndependentResources();
 
 	if (SUCCEEDED(hr)) {
-		//加载资源
-		LoadImageResources();
-
 		//设计窗口
 		WNDCLASSEX wcex = { 0 };
 		wcex.cbSize = sizeof(WNDCLASSEX);
-		wcex.style = CS_HREDRAW | CS_VREDRAW;
+		wcex.style = CS_DBLCLKS | CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
 		wcex.lpfnWndProc = DemoGame::WndProc;
 		wcex.cbClsExtra = 0;
 		wcex.cbWndExtra = 0;
@@ -194,7 +256,7 @@ HRESULT DemoGame::Initialize()
 		m_hwnd = CreateWindow(
 			L"D2DDemoGame",
 			L"Demo Game",
-			WS_OVERLAPPEDWINDOW,
+			WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
 			CW_USEDEFAULT,
 			CW_USEDEFAULT,
 			static_cast<UINT>(ceil(800.f * dpiX / 96.f)),
@@ -206,6 +268,13 @@ HRESULT DemoGame::Initialize()
 		);
 
 		hr = m_hwnd ? S_OK : E_FAIL;
+
+		if (SUCCEEDED(hr))
+		{
+			ShowWindow(m_hwnd, SW_SHOWNORMAL);
+			UpdateWindow(m_hwnd);
+		}
+
 		if (SUCCEEDED(hr))
 		{
 			ShowWindow(m_hwnd, SW_SHOWNORMAL);
@@ -213,34 +282,60 @@ HRESULT DemoGame::Initialize()
 		}
 	}
 
+	//创建游戏控制器
+	if (SUCCEEDED(hr))
+	{
+		m_pGameController = new GameController(this);
+		m_pGameController->Initialize();
+	}
+
 	return hr;
 }
 
 //render target
-void DemoGame::OnRender()
+//void DemoGame::OnRender()
+//{
+//	HRESULT hr = S_OK;
+//
+//	hr = CreateDeviceResources();
+//
+//	if (SUCCEEDED(hr))
+//	{
+//		m_pRenderTarget->BeginDraw();
+//
+//		m_pGameController->onRender();
+//		//D2D1_SIZE_F rtSize = m_pRenderTarget->GetSize();
+//		//D2D1_SIZE_U sizeU = m_pD2DBMP_MoveSprite->GetPixelSize();
+//		//D2D1_RECT_F rectangle3 = D2D1::RectF(
+//		//	(rtSize.width - sizeU.width)*0.5f,
+//		//	(rtSize.height - sizeU.height)*0.5f,
+//		//	sizeU.width + (rtSize.width - sizeU.width)*0.5f,
+//		//	sizeU.height + (rtSize.height - sizeU.height)*0.5f
+//		//);
+//		//m_pRenderTarget->DrawBitmap(m_pD2DBMP_MoveSprite, &rectangle3, 1.0f);
+//
+//		m_pRenderTarget->EndDraw();
+//	}
+//}
+
+//render start
+HRESULT DemoGame::RenderStart()
 {
 	HRESULT hr = S_OK;
-
+	
 	hr = CreateDeviceResources();
-
-	//加载资源
-	LoadImageResources();
-
+	
 	if (SUCCEEDED(hr))
 	{
-		m_pRenderTarget->BeginDraw();/*
-		D2D1_SIZE_F rtSize = m_pRenderTarget->GetSize();
-		D2D1_SIZE_U sizeU = m_pD2DBMP_MoveSprite->GetPixelSize();
-		D2D1_RECT_F rectangle3 = D2D1::RectF(
-			(rtSize.width - sizeU.width)*0.5f,
-			(rtSize.height - sizeU.height)*0.5f,
-			sizeU.width + (rtSize.width - sizeU.width)*0.5f,
-			sizeU.height + (rtSize.height - sizeU.height)*0.5f
-		);*/
-		m_pRenderTarget->DrawBitmap(m_pD2DBMP_MoveSprite/*, &rectangle3, 1.0f*/);
-
-		m_pRenderTarget->EndDraw();
+		m_pRenderTarget->BeginDraw();
 	}
+
+	return hr;
+}
+
+void DemoGame::RenderEnd()
+{
+	m_pRenderTarget->EndDraw();
 }
 
 //游戏的过程函数
@@ -322,4 +417,21 @@ int WINAPI WinMain(
 		CoUninitialize();
 	}
 	return 0;
+	
+}
+
+//释放资源
+void DemoGame::ReleaseObjs()
+{
+	//D2D
+	SafeRelease(&m_pDirect2dFactory);
+	SafeRelease(&m_pRenderTarget);
+	SafeRelease(&m_pLightSlateGrayBrush);
+	SafeRelease(&m_pCornflowerBlueBrush);
+
+	//WIC
+	SafeRelease(&m_pWicImagingFactory);
+	SafeRelease(&m_pWicDecoder);
+	SafeRelease(&m_pWicFrame);
+	SafeRelease(&m_pConvertedSourceBitMap);
 }
